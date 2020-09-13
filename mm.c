@@ -75,13 +75,10 @@ static char *pre_listp;
  */
 static void *coalesce(void *p)
 {
-    // printf("p: %p, heap: %p, prev: %p, hdrp: %p\n", p, heap_listp, PREV_BLKP(p), HDRP(p));
-
     int prev_flag = GET_ALLOC(FTRP(PREV_BLKP(p)));
     int next_flag = GET_ALLOC(HDRP(NEXT_BLKP(p)));
     int size = GET_SIZE(HDRP(p));
 
-    // 前后两个块都已分配, 不能合并
     if (prev_flag && next_flag) { 
         ;
     } else if (prev_flag && !next_flag) {
@@ -100,6 +97,7 @@ static void *coalesce(void *p)
         PUT(FTRP(NEXT_BLKP(p)), PACK(size, 0));
         p = PREV_BLKP(p);
     }
+    pre_listp = p;  // 如采用下次适配，这里注意更新pre_listp的值，以免出错
     return p;
 }
 
@@ -111,24 +109,24 @@ static void *coalesce(void *p)
  */
 static void *extend_heap(size_t words)
 {
-    size_t size = (words % 2) ? ((words + 1) * WSIZE) : (words * WSIZE);
+    size_t size = (words % 2) ? ((words + 1) * WSIZE) : (words * WSIZE);    //取偶数
     void *p;
     if ((p = mem_sbrk(size)) == (void *)-1) {
         return NULL;
     }
     
-    PUT(HDRP(p), PACK(size, 0));             // 设新空闲块头部,取代旧的结尾块头部
-    PUT(FTRP(p), PACK(size, 0));             // 设新空闲块脚部
-    PUT(HDRP(NEXT_BLKP(p)), PACK(0, 1));     // 设新的结尾块头部
+    PUT(HDRP(p), PACK(size, 0));             // 修改老结尾块, 即新分配块头部
+    PUT(FTRP(p), PACK(size, 0));             // 设置新空闲块脚部
+    PUT(HDRP(NEXT_BLKP(p)), PACK(0, 1));     // 设新的结尾块
 
-    return coalesce(p);
+    return coalesce(p); // 还要考虑新分配块是否能和前一个块合并
 }
 
 
 /* 
  * mm_init - initialize the malloc package.
- * 创建一个空的空闲链表，
- * | 非填充字节 | 序言块头部(8/1) | 序言块脚部(8/1) | 结尾块(0/1) | 共4 + 8 + 4 = 16字节
+ * 创建一个空的空闲链表，格式如下, 大小为16字节
+ * | 填充字节 | 序言块头部(8/1) | 序言块脚部(8/1) | 结尾块(0/1) | 共4 + 8 + 4 = 16字节
  */
 int mm_init(void)
 {
@@ -140,10 +138,10 @@ int mm_init(void)
     PUT(heap_listp + WSIZE, PACK(DSIZE, 1));
     PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));
     PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
-    heap_listp += (2 * WSIZE);     // 指向序言块的下一个块
+    heap_listp += (2 * WSIZE);                      // 指向序言块的脚部
     pre_listp = heap_listp;
 
-    if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
+    if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {   // 分配4096个字节
         return -1;
     }
     return 0;
@@ -153,9 +151,9 @@ int mm_init(void)
 /*
  *  打印链表，用于调试诊断
  */
+#if 0
 static void print_list(char *fmt, ...)
 {
-#if 0
     va_list args;
     va_start(args, fmt);
     vprintf(fmt, args);
@@ -167,8 +165,8 @@ static void print_list(char *fmt, ...)
         printf("ptr: %p, SIZE: %d, ALLOC: %d\n", ptr, GET_SIZE(HDRP(ptr)), GET_ALLOC(HDRP(ptr)));
     }
     printf("===============print list end===================\n");
-#endif
 }
+#endif
 
 /*
  * 适配算法，采用首次适配
@@ -184,10 +182,33 @@ static void *first_fit(int asize)
     return NULL;
 }
 
+/*
+ * 适配算法，采用下一次适配
+ */
+static void *next_fit(int asize)
+{
+    // 结尾块大小位0, 分配位为1, 表示已经结束
+    for (void *ptr = pre_listp; GET_SIZE(HDRP(ptr)) > 0; ptr = NEXT_BLKP(ptr)) {
+        if (!GET_ALLOC(HDRP(ptr)) && asize <= GET_SIZE(HDRP(ptr))) {
+            pre_listp = ptr;
+            return ptr;
+        }
+    }
 
+    for (void *ptr = heap_listp; ptr != pre_listp; ptr = NEXT_BLKP(ptr)) {
+        if (!GET_ALLOC(HDRP(ptr)) && asize <= GET_SIZE(HDRP(ptr))) {
+            pre_listp = ptr;
+            return ptr;
+        }
+    }
+
+    return NULL;
+}
+
+// 适配算法, 这里可采用首次适配法、下一次适配法、最佳适配法
 static void *fit(int asize)
 {
-    return first_fit(asize);
+    return next_fit(asize);
 }
 
 
@@ -222,10 +243,11 @@ static void place(void *p, size_t asize)
  */
 void *mm_malloc(size_t size)
 {
-    if (size == 0) {                // 拒绝这种邪恶的需求
+    if (size == 0) {                
         return NULL;
     }
 
+    // 最少分配16字节，8字节满足对齐，另8字节用来放头部和脚部
     int asize;
     if (size <= DSIZE) {
         asize = 2 * DSIZE;
@@ -233,12 +255,14 @@ void *mm_malloc(size_t size)
         asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
     }
 
+    // 根据请求的size搜索空闲链表，寻找一个合适的空闲块，放置这个请求块并可选地分隔空闲块
     void *p;
     if ((p = fit(asize)) != NULL) {
         place(p, asize);
         return p;
     }
-
+    
+    // 如分配器不能发现一个空闲块，只能扩展堆并分配一个新的空闲块 
     if ((p = extend_heap(MAX(CHUNKSIZE, asize) / WSIZE)) == NULL) {
         return NULL;
     }
@@ -251,8 +275,6 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
-    print_list("mm_free ptr: %p\n", ptr);
-
     // 头部和脚部分配位清0, 并尽可能合并空闲块
     int size = GET_SIZE(HDRP(ptr));
     PUT(HDRP(ptr), PACK(size, 0));
