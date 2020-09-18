@@ -47,8 +47,8 @@ team_t team = {
 
 // 定义操作显示空闲链表的常数和宏
 #define WSIZE 4                                     // 头部、脚部大小: 4字节
-#define DSIZE 8                                     // 双字: 8字节
-#define CHUNKSIZE (1 << 12)                         // 4096字节
+#define DSIZE (2 * WSIZE)                           // 双字: 8字节
+#define CHUNKSIZE (1 << 12)                         // 4096字节, 执行extend_heap一次, 堆上扩展的大小
 #define PACK(size, alloc)  ((size) | (alloc))
 
 // 32位数据读写
@@ -65,6 +65,14 @@ team_t team = {
 // 空闲块: | 头部(4字节) | prev指针(8字节) | next指针(8字节) | payload | 脚部(4字节) |
 // 已分配块: | 头部(4字节) | payload | 脚部(4字节) |
 // 以上可以看出，初始对齐块4字节的目的，在于访问空闲块prev, next时只需一次访问
+// 分离链表: |(16-31)|(32-63)|(64-127)|(128-255)| ..... |(2^23,2^24-1)|
+#define MAX_LIST_NUM 20                             // 分离链表最大数
+#define MIN_INDEX 4                                 // 最小块为16字节, 即2^4。这里MIN_INDEX表示分离链表中第一条链表的最小块大小
+
+// 根据8字节对齐要求, 计算一个块最小需要的字节数:
+// 32位系统，块最小为 4 + 2 * 4 + 4 = 16字节
+// 64位系统, 块最小为 4 + 2 * 8 + 4 = 24字节
+#define MIN_BLOCK_SIZE (DSIZE + 2 * sizeof(intptr_t)) 
 #define PTR(bp)     ((char *)(bp))
 
 #define HDRP(bp)    ((char *)(bp) - WSIZE)
@@ -81,23 +89,27 @@ team_t team = {
 #define GET_PREV(bp) ((char *)(GET_P(PREV(bp))))
 #define GET_SUCC(bp) ((char *)(GET_P(SUCC(bp))))
 
-#define MAX_LIST_NUM 20                             // 分离链表最大数
 
 static void print_list(int i)
 {
+    int print_flag = 0;
     int size;
     char *p = mem_heap_lo() + i * sizeof(intptr_t);
     p = PTR(GET_P(p));
     while (p != NULL) {
+        print_flag = 1;
         printf("(%p, %d) -> ", p, GET_SIZE(HDRP(p)));
         p = GET_SUCC(p);
     }
-    printf("end\n");
+
+    if (print_flag) {
+        printf("end\n");
+    }
 }
 
-static int mm_check()
+static int mm_check(char *func)
 {
-    printf("=============free list============\n");
+    printf("func: %s\n=============free list============\n", func);
     for (int i = 0; i < MAX_LIST_NUM; ++i) {
         print_list(i);
     }
@@ -106,6 +118,21 @@ static int mm_check()
 
 static void insert_node(void *p, size_t size)
 {
+    /*
+    int list_size;
+    for (int i = 0; i < MAX_LIST_NUM; ++i) {
+        list_size = (1 << (MIN_INDEX + i));
+        if (size > list_size) {
+            continue;
+        }
+    
+        
+
+
+
+    }
+    */
+
     return;
 }
 
@@ -119,9 +146,32 @@ static void *coalesce(void *p)
     return p;
 }
 
-static void *place(void *p)
+
+// 根据8字节对齐要求, 计算一个块最小需要的字节数:
+// 32位系统，块最小为 4 + 2 * 4 + 4 = 16字节
+// 64位系统, 块最小为 4 + 2 * 8 + 4 = 24字节
+static void *place(void *p, size_t size)
 {
-    return NULL;
+    int max_size = GET_SIZE(HDRP(p));
+    int delta_size = max_size - size;
+
+    delete_node(p);     
+    
+    // 如剩余大小少于最小块大小, 不做分割
+    if (delta_size < MIN_BLOCK_SIZE) {
+        PUT(HDRP(p), PACK(max_size, 1));
+        PUT(FTRP(p), PACK(max_size, 1));
+        return p;
+    } 
+
+    // 否则需要分割，并将分割后的空闲块加到空闲链表
+    PUT(HDRP(p), PACK(size, 1));
+    PUT(FTRP(p), PACK(max_size, 1));
+    PUT(HDRP(NEXT_BLKP(p)), PACK(delta_size, 0));
+    PUT(HDRP(NEXT_BLKP(p)), PACK(delta_size, 0));
+    insert_node(NEXT_BLKP(p), delta_size);
+
+    return p;
 }
 
 
@@ -176,18 +226,30 @@ int mm_init(void)
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
+
+// helper func, 从空闲链表寻找合适的空闲块
+static void *find_free_block_from_lists(size_t size)
+{
+    return NULL;
+}
+
+
 void *mm_malloc(size_t size)
 {
-    mm_check();
+    mm_check("mm_malloc");
+    size = (size < MIN_BLOCK_SIZE) ? MIN_BLOCK_SIZE: ALIGN(MIN_BLOCK_SIZE + DSIZE);
 
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-	return NULL;
-    else {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+    // 首先，寻找空闲链表是否有合适的空闲块。如果没找到合适的空闲块, 需要扩展堆
+    void *p = find_free_block_from_lists(size);
+    if (p == NULL) {
+        if ((p = extend_heap(MAX(size, CHUNKSIZE))) == NULL) {
+            printf("mm_malloc, extend_heap failed!\n");
+            return NULL;
+        }
     }
+
+    p = place(p, size);
+    return p;
 }
 
 /*
@@ -195,7 +257,15 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
-    mm_check();
+    mm_check("mm_free");
+    int size = GET_SIZE(HDRP(ptr));
+    PUT(HDRP(ptr), PACK(size, 0));
+    PUT(FTRP(ptr), PACK(size, 0));
+
+    // 注意将释放后的空闲块重新插入到分离链表中
+    insert_node(ptr, size);
+    
+    coalesce(ptr);
 }
 
 /*
@@ -203,7 +273,7 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    mm_check();
+    mm_check("mm_realloc");
     void *oldptr = ptr;
     void *newptr;
     size_t copySize;
