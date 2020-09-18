@@ -143,6 +143,38 @@ static void delete_node(void *p)
 
 static void *coalesce(void *p)
 {
+    int prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(p)));  
+    int next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(p)));
+    int size = GET_SIZE(HDRP(p));
+
+    if (prev_alloc && next_alloc) {             // 前后块均已分配，不可合并
+        return p;
+    }
+
+    if (prev_alloc && !next_alloc) {
+        delete_node(p);
+        delete_node(NEXT_BLKP(p));
+        size += GET_SIZE(HDRP(NEXT_BLKP(p)));
+        PUT(HDRP(p), PACK(size, 0));
+        PUT(FTRP(p), PACK(size, 0));
+    } else if (!prev_alloc && next_alloc) {
+        delete_node(PREV_BLKP(p));
+        delete_node(p);
+        size += GET_SIZE(HDRP(PREV_BLKP(p)));
+        PUT(FTRP(p), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(p)), PACK(size, 0));
+        p = PREV_BLKP(p);
+    } else {                                     // 前后两个块都空闲，一次性合并三个块
+        delete_node(PREV_BLKP(p));
+        delete_node(p);
+        delete_node(NEXT_BLKP(p));
+        size += GET_SIZE(HDRP(PREV_BLKP(p))) + GET_SIZE(HDRP(NEXT_BLKP(p)));
+        PUT(FTRP(NEXT_BLKP(p)), PACK(size, 0));
+        PUT(HDRP(PREV_BLKP(p)), PACK(size, 0));
+        p = PREV_BLKP(p);
+    }
+
+    insert_node(p, size);
     return p;
 }
 
