@@ -35,6 +35,9 @@ team_t team = {
     ""
 };
 
+#define TRUE 1
+#define FALSE 0
+
 /* single word (4) or double word (8) alignment */
 #define ALIGNMENT 8
 
@@ -90,55 +93,187 @@ team_t team = {
 #define GET_SUCC(bp) ((char *)(GET_P(SUCC(bp))))
 
 
+static char *get_list_head(int idx) {
+    return PTR(GET_P((char *)mem_heap_lo() + idx * sizeof(intptr_t)));
+}
+
 static void print_list(int i)
 {
     int print_flag = 0;
     int size;
-    char *p = mem_heap_lo() + i * sizeof(intptr_t);
-    p = PTR(GET_P(p));
+    char *p = get_list_head(i);
+
     while (p != NULL) {
         print_flag = 1;
         printf("(%p, %d) -> ", p, GET_SIZE(HDRP(p)));
         p = GET_SUCC(p);
     }
-
     if (print_flag) {
-        printf("end\n");
+        printf("end. list [%d]\n", i);
     }
+}
+
+
+static void print_arr()
+{
+    char *head;
+    char *ptr = (char *)mem_heap_lo();
+    printf("=================================ARRAY BEGIN====================================\n");
+    for (int i = 0; i < MAX_LIST_NUM; ++i) {
+        head = PTR(GET_P(ptr + i * sizeof(intptr_t)));
+        printf("|%p|", head);
+    }
+    printf("|\n");
+
+    ptr += (MAX_LIST_NUM * sizeof(intptr_t)) + WSIZE + WSIZE;
+    for ( ; GET_SIZE(HDRP(ptr)) != 0; ptr = NEXT_BLKP(ptr)) {
+        printf("(%p, %d, %d) ->", ptr, GET_SIZE(HDRP(ptr)), GET_ALLOC(HDRP(ptr)));
+    }
+    printf("end\n");
+    printf("===============================ARRAY END====================================\n\n");
 }
 
 static int mm_check(char *func)
 {
-    printf("func: %s\n=============free list============\n", func);
+    /*
+    printf("\n\n===FUNC: %s\n", func);
+    printf("==============================FREE LIST BEGIN===============================\n");
     for (int i = 0; i < MAX_LIST_NUM; ++i) {
         print_list(i);
     }
+    printf("==============================FREE LIST END=================================\n");
+    print_arr();
+    */
     return 1;
 }
 
+// helper func: 在第i条分离链表上插入节点
+static void insert_node_by_list_index(void *p, size_t size, int idx)
+{
+    // 首先考虑链表为空场景，只需添加该节点即可
+    char *listp = (char *)mem_heap_lo() + idx * sizeof(intptr_t);
+    char *cur = PTR(GET_P(listp));
+    char *pre = NULL;
+
+    if (cur == NULL) {
+        PUT_P(listp, p);
+        PUT_P(PREV(p), NULL);
+        PUT_P(SUCC(p), NULL);
+        return;
+    }
+
+    while (cur != NULL) {
+        if (size > GET_SIZE(HDRP(cur))) {
+            pre = cur;
+            cur = GET_SUCC(cur);
+            continue;
+        }
+        break;   
+    }
+    
+    // cur等于NULL, 只能将节点插入链表末尾
+    if (cur == NULL) {
+        PUT_P(SUCC(pre), p);
+        PUT_P(PREV(p), pre);
+        PUT_P(SUCC(p), NULL);
+        return;
+    }
+
+    // cur等于head, 在链表最开头插入
+    if (pre == NULL) {
+        PUT_P(listp, p);
+        PUT_P(PREV(p), NULL);
+        PUT_P(SUCC(p), cur);
+        PUT_P(PREV(cur), p);       
+        return;
+    }
+    
+    // 在链表中间插入
+    PUT_P(SUCC(pre), p);
+    PUT_P(PREV(p), pre);
+    PUT_P(SUCC(p), cur);
+    PUT_P(PREV(cur), p);
+}
+
+// 功能：将空闲块插入空闲链表
+// 1. 根据块大小，选择合适的链表插入空闲块
+// 2. 由从小到大的顺序插入空闲块
 static void insert_node(void *p, size_t size)
 {
-    /*
     int list_size;
     for (int i = 0; i < MAX_LIST_NUM; ++i) {
         list_size = (1 << (MIN_INDEX + i));
         if (size > list_size) {
             continue;
         }
-    
-        
-
-
-
+        insert_node_by_list_index(p, size, i);
+        // printf("insert_node success! p: %p, size: %d, listid: %d\n", p, size, i);
+        return;
     }
-    */
-
-    return;
+    // printf("insert_node failed! p: %p, size: %d\n", p, size);
 }
+
+
+static int delete_node_by_list_index(void *p, int size, int idx)
+{
+    char *listp = (char *)mem_heap_lo() + idx * sizeof(intptr_t);
+    char *cur = PTR(GET_P(listp));
+    char *pre = NULL;
+
+    while ((cur != NULL) && (cur != p)) {
+        pre = cur;
+        cur = GET_SUCC(cur);   
+    }
+    // 链表为空，直接返回FALSE
+    if (cur == NULL) {
+        return FALSE;
+    }
+
+    // 链表只有1个节点
+    if (GET_SUCC(cur) == NULL) {
+        PUT_P(listp, NULL);
+        return TRUE;
+    }
+
+    // 删除的节点在链表头部
+    if (pre == NULL) {
+        PUT_P(listp, GET_SUCC(cur));
+        PUT_P(GET_SUCC(cur), NULL);
+        return TRUE;
+    }
+
+    // 删除的节点在链表结尾
+    if (GET_SUCC(cur) == NULL) {
+        PUT_P(SUCC(pre), NULL);
+        return TRUE;
+    }
+
+    // 删除的节点在链表中间
+
+    PUT_P(SUCC(pre), GET_SUCC(cur));
+    PUT_P(GET_SUCC(cur), GET_PREV(cur));
+    return TRUE;
+}
+
 
 static void delete_node(void *p)
 {
-    return;
+    int i;
+    int list_size;
+    int size = GET_SIZE(HDRP(p));
+
+    for (i = 0; i < MAX_LIST_NUM; ++i) {
+        list_size = (1 << (MIN_INDEX + i));
+        if (size <= list_size) {
+            break;
+        }
+    }
+
+    for ( ; i < MAX_LIST_NUM; ++i) {
+        if (delete_node_by_list_index(p, size, i)) {
+            return;
+        }
+    }
 }
 
 static void *coalesce(void *p)
@@ -198,9 +333,9 @@ static void *place(void *p, size_t size)
 
     // 否则需要分割，并将分割后的空闲块加到空闲链表
     PUT(HDRP(p), PACK(size, 1));
-    PUT(FTRP(p), PACK(max_size, 1));
+    PUT(FTRP(p), PACK(size, 1));
     PUT(HDRP(NEXT_BLKP(p)), PACK(delta_size, 0));
-    PUT(HDRP(NEXT_BLKP(p)), PACK(delta_size, 0));
+    PUT(FTRP(NEXT_BLKP(p)), PACK(delta_size, 0));
     insert_node(NEXT_BLKP(p), delta_size);
 
     return p;
@@ -240,10 +375,11 @@ int mm_init(void)
     for (int i = 0; i < MAX_LIST_NUM; ++i) {
         PUT_P(p + i * sizeof(intptr_t), NULL);
     }
-    p += MAX_LIST_NUM * DSIZE;
+    p += MAX_LIST_NUM * sizeof(intptr_t);
 
     // 4字节对齐块，填0; 设置两个4字节序言块和1个结尾块
     // 对齐目的是为了加快访问8字节指针的速度
+    PUT(p, PACK(WSIZE, 0));
     PUT(p + WSIZE, PACK(DSIZE, 1));
     PUT(p + 2 * WSIZE, PACK(DSIZE, 1));
     PUT(p + 3 * WSIZE, PACK(0, 1));
@@ -251,6 +387,7 @@ int mm_init(void)
     if ((p = extend_heap(CHUNKSIZE)) == NULL) {
         return -1;
     }
+    mm_check("mm_init");
     return 0;
 }
 
@@ -259,20 +396,47 @@ int mm_init(void)
  *     Always allocate a block whose size is a multiple of the alignment.
  */
 
-// helper func, 从空闲链表寻找合适的空闲块
-static void *find_free_block_from_lists(size_t size)
+
+// 在第i条链表上寻找合适空闲块, 成功返回空闲块指针bp(prev), 失败返回NULL
+static void *find_free_block_by_list_index(size_t size, int idx)
 {
+    char *p = get_list_head(idx);
+    while (p != NULL) {
+        if (GET_SIZE(HDRP(p)) >= size) {
+            return p;
+        }
+        p = GET_SUCC(p);
+    }
     return NULL;
+}
+
+static void *find_free_block(size_t size)
+{
+    void *p = NULL;
+    int list_size;
+    for (int i = 0; i < MAX_LIST_NUM; ++i) {
+        list_size = (1 << (MIN_INDEX + i));
+        if (size > list_size) {
+            continue;
+        }
+     
+        if ((p = find_free_block_by_list_index(size, i)) != NULL) {
+            // printf("find_free_block success! p: %p, size: %d, listid: %d\n", p, size, i);
+            return p;
+        }
+    }
+    // printf("find_free_block failed! p: %p, size: %d\n", p, size);
+    return p;
 }
 
 
 void *mm_malloc(size_t size)
 {
-    mm_check("mm_malloc");
-    size = (size < MIN_BLOCK_SIZE) ? MIN_BLOCK_SIZE: ALIGN(MIN_BLOCK_SIZE + DSIZE);
+    char logstr[256] = "0";
+    size = (size < MIN_BLOCK_SIZE) ? MIN_BLOCK_SIZE: ALIGN(MIN_BLOCK_SIZE + size);
 
     // 首先，寻找空闲链表是否有合适的空闲块。如果没找到合适的空闲块, 需要扩展堆
-    void *p = find_free_block_from_lists(size);
+    void *p = find_free_block(size);
     if (p == NULL) {
         if ((p = extend_heap(MAX(size, CHUNKSIZE))) == NULL) {
             printf("mm_malloc, extend_heap failed!\n");
@@ -281,6 +445,8 @@ void *mm_malloc(size_t size)
     }
 
     p = place(p, size);
+    sprintf(logstr, "mm_malloc, size: %d, ptr: %p", size, p);
+    mm_check(logstr);
     return p;
 }
 
@@ -289,15 +455,17 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
-    mm_check("mm_free");
+    char logstr[256];
+    sprintf(logstr, "mm_free ptr: %p\n", ptr);
     int size = GET_SIZE(HDRP(ptr));
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
 
     // 注意将释放后的空闲块重新插入到分离链表中
     insert_node(ptr, size);
-    
     coalesce(ptr);
+
+    mm_check(logstr);
 }
 
 /*
@@ -320,17 +488,4 @@ void *mm_realloc(void *ptr, size_t size)
     mm_free(oldptr);
     return newptr;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
 
