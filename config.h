@@ -55,7 +55,7 @@
 /* 
  * Alignment requirement in bytes (either 4 or 8) 
  */
-#define ALIGNMENT 8  
+#define ALIGNMENT (sizeof(size_t))
 
 /* 
  * Maximum heap size in bytes 

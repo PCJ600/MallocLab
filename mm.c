@@ -54,10 +54,9 @@ team_t team = {
 #define CHUNKSIZE (1 << 12)                         // 4096字节, 执行extend_heap一次, 堆上扩展的大小
 #define PACK(size, alloc)  ((size) | (alloc))
 
-// 32位数据读写
 #define GET(p)             (*(unsigned int *)(p))               
 #define PUT(p, val)        (*(unsigned int *)(p) = (val))       
-#define GET_SIZE(p)        (GET(p) & ~0x7)       // 获取块大小, 这里块大小不会超过2^32字节
+#define GET_SIZE(p)        (GET(p) & ~0x1)       // 获取块大小, 这里块大小不会超过2^32字节
 #define GET_ALLOC(p)       (GET(p) & 0x1)        // 判断这个块是否已分配              
 
 // 指针类型读写，使用intptr_t保证不同机器字长(32位、64位)之间的通用性
@@ -100,7 +99,7 @@ static char *get_list_head(int idx) {
 
 // ===================================================调试堆相关API开始================================
 enum ERRCODE {
-    OK = 0, ERR1, ERR2, ERR3, ERR4, ERR5, ERR6, ERR7, ERR8, ERR9
+    OK = 0, ERR1, ERR2, ERR3, ERR4, ERR5, ERR6, ERR7, ERR8, ERR9, ERR10
 };
 
 static void print_list(int i)
@@ -173,6 +172,7 @@ static enum ERRCODE check_heap_arr()
             return ERR3;
         }
         if (GET(HDRP(ptr)) != GET(FTRP(ptr))) { // 检查头部和脚部一致性
+            printf("not consitent ptr: %p, size(head): %d, size(foot): %d\n", ptr, GET_SIZE(HDRP(ptr)), GET_SIZE(FTRP(ptr)));
             return ERR4;
         }
         if (ptr < (char *)mem_heap_lo() || ptr > (char *)mem_heap_hi()) {
@@ -255,7 +255,7 @@ static void print_heap_arr()
     }
     printf("|\n");
 
-    ptr += (MAX_LIST_NUM * sizeof(intptr_t)) + WSIZE + WSIZE;
+    ptr += (MAX_LIST_NUM * sizeof(intptr_t)) + DSIZE;
     for ( ; GET_SIZE(HDRP(ptr)) != 0; ptr = NEXT_BLKP(ptr)) {
         printf("(%p, %d, %d) ->", ptr, GET_SIZE(HDRP(ptr)), GET_ALLOC(HDRP(ptr)));
     }
@@ -274,15 +274,67 @@ static void mm_print(char *func)
 // 每次调用mm_init, mm_malloc, mm_free, mm_realloc后，使用mm_check检查堆区是否错误
 static int mm_check(char *func)
 {
-    /*
+#ifdef DEBUG
     mm_print(func);
     enum ERRCODE errCode;
     if ((errCode = check_heap()) != OK) {
         printf("*********************************check_heap failed! errCode: %d***************************************\n", errCode);
         exit(1);
-    }*/
+    }
+#endif
     return 1;
 }
+
+// 针对malloc检查
+static void mm_check_malloc(void *p, size_t size)
+{
+#ifdef DEBUG
+    int tmpsize;
+    char *head = (char *)mem_heap_lo() + MAX_LIST_NUM * sizeof(intptr_t) + DSIZE;
+    for ( ; GET_SIZE(HDRP(head)) != 0; head = NEXT_BLKP(head)) {
+        if (head != p) {
+            continue;
+        }
+        tmpsize = GET_SIZE(HDRP(head));
+        if(tmpsize >= size) {
+            return;
+        }
+        printf("mm_check_malloc failed!, size %d should be smaller than %d in heap_arr\n", size, tmpsize);
+        exit(-1);
+    }
+    printf("mm_check_malloc failed!, can't find %p in heap_arr!\n", p);
+    exit(-1);
+#endif
+}
+
+// 针对mm_free做检查, 判断要释放的指针是否可以在堆数组中找到
+static enum ERRCODE check_free(void *ptr)
+{
+    if (ptr < mem_heap_lo() || ptr > mem_heap_hi()) {
+        return ERR5;
+    }
+
+    char *head = (char *)mem_heap_lo() + MAX_LIST_NUM * sizeof(intptr_t) + DSIZE;
+    for ( ; GET_SIZE(HDRP(head)) != 0; head = NEXT_BLKP(head)) {
+        if (head == ptr) {
+            return OK;
+        }
+    }
+    return ERR10;
+}
+
+// 针对free检查
+static void mm_check_free(void *ptr)
+{
+#ifdef DEBUG
+    enum ERRCODE errCode;
+    if ((errCode = check_free(ptr)) != OK) {
+        printf("*********************************check_free failed! errCode: %d***************************************\n", errCode);
+        exit(-1);
+    }
+#endif
+}
+
 // ======================================================调试堆相关API结束================================
 
 
@@ -362,7 +414,7 @@ static int delete_node_by_list_index(void *p, int size, int idx)
         pre = cur;
         cur = GET_SUCC(cur);   
     }
-    // 链表为空，直接返回FALSE
+    // 链表中不存在该节点，返回FALSE
     if (cur == NULL) {
         return FALSE;
     }
@@ -387,7 +439,6 @@ static int delete_node_by_list_index(void *p, int size, int idx)
     }
 
     // 删除的节点在链表中间
-
     PUT_P(SUCC(pre), GET_SUCC(cur));
     PUT_P(GET_SUCC(cur), GET_PREV(cur));
     return TRUE;
@@ -571,10 +622,18 @@ static void *find_free_block(size_t size)
 }
 
 
+static int get_malloc_size(size_t size)
+{
+    if (size <= MIN_BLOCK_SIZE - DSIZE) {
+        return MIN_BLOCK_SIZE;
+    }
+    return ALIGN(size + DSIZE);
+}
+
 void *mm_malloc(size_t size)
 {
     char logstr[256] = "0";
-    size = (size < MIN_BLOCK_SIZE) ? MIN_BLOCK_SIZE: ALIGN(MIN_BLOCK_SIZE + size);
+    size = get_malloc_size(size);
 
     // 首先，寻找空闲链表是否有合适的空闲块。如果没找到合适的空闲块, 需要扩展堆
     void *p = find_free_block(size);
@@ -587,7 +646,9 @@ void *mm_malloc(size_t size)
 
     p = place(p, size);
     sprintf(logstr, "mm_malloc, size: %d, ptr: %p", size, p);
+
     mm_check(logstr);
+    mm_check_malloc(p, size);
     return p;
 }
 
@@ -596,8 +657,10 @@ void *mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
+    mm_check_free(ptr);
     char logstr[256];
     sprintf(logstr, "mm_free ptr: %p\n", ptr);
+
     int size = GET_SIZE(HDRP(ptr));
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
@@ -615,18 +678,32 @@ void mm_free(void *ptr)
 void *mm_realloc(void *ptr, size_t size)
 {
     mm_check("mm_realloc");
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
+    if (ptr == NULL || size == 0) {
+        return NULL;
+    }
+
+    // 如果realloc请求的size小于原来的大小，简单返回原块
+    size = get_malloc_size(size);
+    int old_size = GET_SIZE(HDRP(ptr));
+    if (old_size >= size) {
+        return ptr;
+    }
+
+    // 考虑下一个块是否空闲块，能否直接合并
+    int next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
+    int next_size = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+    if (!next_alloc && (next_size >= size - old_size)) {
+        delete_node(NEXT_BLKP(ptr));
+        PUT(HDRP(ptr), PACK(next_size + old_size, 1));
+        PUT(FTRP(ptr), PACK(next_size + old_size, 1));
+        return ptr;
+    }
     
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
+    // 只能使用malloc申请新的空闲块，复制原块内容，并调用free释放原块
+    void *oldptr = ptr;
+    ptr = mm_malloc(size);
+    memcpy(ptr, oldptr, old_size);
     mm_free(oldptr);
-    return newptr;
+    return ptr;
 }
 
