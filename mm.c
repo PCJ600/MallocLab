@@ -39,10 +39,10 @@ team_t team = {
 #define FALSE 0
 
 /* single word (4) or double word (8) alignment */
-#define ALIGNMENT 8
+#define ALIGNMENT (sizeof(size_t)) 
 
 /* rounds up to the nearest multiple of ALIGNMENT */
-#define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
+#define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~(ALIGNMENT-1))
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
@@ -50,7 +50,7 @@ team_t team = {
 
 // 定义操作显示空闲链表的常数和宏
 #define WSIZE 4                                     // 头部、脚部大小: 4字节
-#define DSIZE (2 * WSIZE)                           // 双字: 8字节
+#define DSIZE 8                                     // 双字: 8字节
 #define CHUNKSIZE (1 << 12)                         // 4096字节, 执行extend_heap一次, 堆上扩展的大小
 #define PACK(size, alloc)  ((size) | (alloc))
 
@@ -86,16 +86,22 @@ team_t team = {
 
 // 显示空闲链表法, 表示前驱和后继指针
 #define PREV(bp)    ((char *)(bp))
-#define SUCC(bp)    ((char *)(bp) + DSIZE) 
+#define SUCC(bp)    ((char *)(bp) + sizeof(intptr_t)) 
 
 // 获取前驱或后继指针的内容, 转化为指针
 #define GET_PREV(bp) ((char *)(GET_P(PREV(bp))))
 #define GET_SUCC(bp) ((char *)(GET_P(SUCC(bp))))
 
-
+// helper func, 获取第idx个分离链表的头指针
 static char *get_list_head(int idx) {
     return PTR(GET_P((char *)mem_heap_lo() + idx * sizeof(intptr_t)));
 }
+
+
+// ===================================================调试堆相关API开始================================
+enum ERRCODE {
+    OK = 0, ERR1, ERR2, ERR3, ERR4, ERR5, ERR6, ERR7, ERR8, ERR9
+};
 
 static void print_list(int i)
 {
@@ -114,7 +120,131 @@ static void print_list(int i)
 }
 
 
-static void print_arr()
+
+static enum ERRCODE check_ptr_in_heap(char *p)
+{
+    char *ptr = (char *)mem_heap_lo() + MAX_LIST_NUM * sizeof(intptr_t) + 2 * WSIZE;
+    for( ; GET_SIZE(HDRP(ptr)) != 0; ptr = NEXT_BLKP(ptr)) {
+        if(ptr != p) {
+            continue;
+        }
+        if (GET_ALLOC(HDRP(p)) == 1) {
+            return ERR6;
+        }
+        return OK;
+    }
+    return ERR7;
+}
+
+
+// 在分离链表中寻找指针p, 找到返回1，找不到返回0
+static int find_ptr_in_free_lists(char *p)
+{
+    char *ptr;
+    for (int i = 0; i < MAX_LIST_NUM; ++i) {
+        ptr = get_list_head(i);
+        while (ptr != NULL) {
+            if (p == ptr) {
+                return 1;
+            }
+            ptr = GET_SUCC(ptr);
+        }
+    }
+    return 0;
+}
+
+
+// 检查堆数组
+static enum ERRCODE check_heap_arr()
+{
+    // 检查堆
+    char *ptr = (char *)mem_heap_lo() + MAX_LIST_NUM * sizeof(intptr_t);
+    // 检查序言块大小和分配位
+    if (GET(ptr + WSIZE) != PACK(DSIZE, 1)) {
+        return ERR1;
+    }
+    if (GET(ptr + 2 * WSIZE) != PACK(DSIZE, 1)) {
+        return ERR2;
+    }
+
+    ptr += DSIZE;
+    for( ; GET_SIZE(HDRP(ptr)) != 0; ptr = NEXT_BLKP(ptr)) {
+        if ((long)ptr % sizeof(intptr_t)) {     // 检查每个块是否对齐
+            return ERR3;
+        }
+        if (GET(HDRP(ptr)) != GET(FTRP(ptr))) { // 检查头部和脚部一致性
+            return ERR4;
+        }
+        if (ptr < (char *)mem_heap_lo() || ptr > (char *)mem_heap_hi()) {
+            return ERR5;
+        }
+    }
+    return OK;
+}
+
+// 检查分离链表
+static enum ERRCODE check_free_lists()
+{
+    char *ptr;
+    enum ERRCODE ret = OK;
+
+    // 检查分离链表中所有空闲块是否都在堆中
+    for (int i = 0; i < MAX_LIST_NUM; ++i) {
+        ptr = get_list_head(i);
+        while (ptr != NULL) {
+            if ((ret = check_ptr_in_heap(ptr)) != OK) {
+                return ret;
+            }
+            ptr = GET_SUCC(ptr);
+        }
+    }
+
+    // 检查数组中每个空闲块是否在链表中找到, 每个已占用块是否都不在链表里
+    ptr = (char *)mem_heap_lo() + MAX_LIST_NUM * sizeof(intptr_t) + 2 * WSIZE;
+
+    for( ; GET_SIZE(HDRP(ptr)) != 0; ptr = NEXT_BLKP(ptr)) {
+        int alloc = GET_ALLOC(HDRP(ptr));
+        if (alloc) {
+            if (find_ptr_in_free_lists(ptr)) {
+                return ERR8;
+            }
+        } else {
+            if (!find_ptr_in_free_lists(ptr)) {
+                printf("ERR9: ptr: %p\n", ptr);
+                return ERR9;
+            }
+        }
+    }
+    return OK;
+}
+
+// 检查堆, 正确返回OK，否则返回错误吗
+static enum ERRCODE check_heap()
+{
+    enum ERRCODE ret = OK;
+    if ((ret = check_heap_arr()) != OK) {
+        return ret;
+    }
+
+    if ((ret = check_free_lists()) != OK) {
+        return ret;
+    }
+    return OK;
+}
+
+// 打印分离链表
+static void print_free_lists()
+{
+    printf("==============================FREE LIST BEGIN===============================\n");
+    for (int i = 0; i < MAX_LIST_NUM; ++i) {
+        print_list(i);
+    }
+    printf("==============================FREE LIST END=================================\n");
+
+}
+
+// 打印堆数组
+static void print_heap_arr()
 {
     char *head;
     char *ptr = (char *)mem_heap_lo();
@@ -133,21 +263,30 @@ static void print_arr()
     printf("===============================ARRAY END====================================\n\n");
 }
 
+
+static void mm_print(char *func)
+{
+    printf("\n\n===FUNC: %s\n", func);
+    print_free_lists();
+    print_heap_arr();
+}
+
+// 每次调用mm_init, mm_malloc, mm_free, mm_realloc后，使用mm_check检查堆区是否错误
 static int mm_check(char *func)
 {
     /*
-    printf("\n\n===FUNC: %s\n", func);
-    printf("==============================FREE LIST BEGIN===============================\n");
-    for (int i = 0; i < MAX_LIST_NUM; ++i) {
-        print_list(i);
-    }
-    printf("==============================FREE LIST END=================================\n");
-    print_arr();
-    */
+    mm_print(func);
+    enum ERRCODE errCode;
+    if ((errCode = check_heap()) != OK) {
+        printf("*********************************check_heap failed! errCode: %d***************************************\n", errCode);
+        exit(1);
+    }*/
     return 1;
 }
+// ======================================================调试堆相关API结束================================
 
-// helper func: 在第i条分离链表上插入节点
+
+// 辅助函数: 在第i条分离链表上插入节点
 static void insert_node_by_list_index(void *p, size_t size, int idx)
 {
     // 首先考虑链表为空场景，只需添加该节点即可
@@ -196,8 +335,8 @@ static void insert_node_by_list_index(void *p, size_t size, int idx)
 }
 
 // 功能：将空闲块插入空闲链表
-// 1. 根据块大小，选择合适的链表插入空闲块
-// 2. 由从小到大的顺序插入空闲块
+// 1. 需要根据块大小，选择合适的链表插入空闲块
+// 2. 按照从小到大的顺序插入空闲块
 static void insert_node(void *p, size_t size)
 {
     int list_size;
@@ -207,20 +346,19 @@ static void insert_node(void *p, size_t size)
             continue;
         }
         insert_node_by_list_index(p, size, i);
-        // printf("insert_node success! p: %p, size: %d, listid: %d\n", p, size, i);
+        // printf("insert_node success: %p, size: %d\n", p, size);
         return;
     }
-    // printf("insert_node failed! p: %p, size: %d\n", p, size);
 }
 
-
+// 辅助函数, 删除第i条分离链表上的指定节点p, 成功返回TRUE, 失败返回FALSE
 static int delete_node_by_list_index(void *p, int size, int idx)
 {
     char *listp = (char *)mem_heap_lo() + idx * sizeof(intptr_t);
     char *cur = PTR(GET_P(listp));
     char *pre = NULL;
 
-    while ((cur != NULL) && (cur != p)) {
+    while ((cur != NULL) && (cur != PTR(p))) {
         pre = cur;
         cur = GET_SUCC(cur);   
     }
@@ -230,7 +368,7 @@ static int delete_node_by_list_index(void *p, int size, int idx)
     }
 
     // 链表只有1个节点
-    if (GET_SUCC(cur) == NULL) {
+    if (GET_SUCC(cur) == NULL && GET_PREV(cur) == NULL) {
         PUT_P(listp, NULL);
         return TRUE;
     }
@@ -256,6 +394,7 @@ static int delete_node_by_list_index(void *p, int size, int idx)
 }
 
 
+// 功能：将p从分离链表中删除
 static void delete_node(void *p)
 {
     int i;
@@ -271,11 +410,13 @@ static void delete_node(void *p)
 
     for ( ; i < MAX_LIST_NUM; ++i) {
         if (delete_node_by_list_index(p, size, i)) {
+            // printf("delete_node success: %p, %d: size, listid: %d\n", p, size, i);
             return;
         }
     }
 }
 
+// 合并, 分四种场景，详细见CSAPP原书
 static void *coalesce(void *p)
 {
     int prev_alloc = GET_ALLOC(HDRP(PREV_BLKP(p)));  
@@ -310,11 +451,12 @@ static void *coalesce(void *p)
     }
 
     insert_node(p, size);
+    
     return p;
 }
 
 
-// 根据8字节对齐要求, 计算一个块最小需要的字节数:
+// 根据字节对齐要求, 计算一个块最小需要的字节数:
 // 32位系统，块最小为 4 + 2 * 4 + 4 = 16字节
 // 64位系统, 块最小为 4 + 2 * 8 + 4 = 24字节
 static void *place(void *p, size_t size)
@@ -342,8 +484,7 @@ static void *place(void *p, size_t size)
 }
 
 
-
-// 向8字节对齐
+// 扩展堆
 static void *extend_heap(size_t size)
 {
     size = ALIGN(size);
@@ -379,7 +520,7 @@ int mm_init(void)
 
     // 4字节对齐块，填0; 设置两个4字节序言块和1个结尾块
     // 对齐目的是为了加快访问8字节指针的速度
-    PUT(p, PACK(WSIZE, 0));
+    PUT(p, 0);
     PUT(p + WSIZE, PACK(DSIZE, 1));
     PUT(p + 2 * WSIZE, PACK(DSIZE, 1));
     PUT(p + 3 * WSIZE, PACK(0, 1));
